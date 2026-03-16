@@ -8,9 +8,11 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 app = Flask(__name__)
 
-# ===================== 【全部填好！直接用】 =====================
+# ===================== 【配置檢查！重點確認 BOSS_USER_ID】 =====================
 LINE_ACCESS_TOKEN = "TXTgg7f8Xbf4+RlW37gCW27YkazQ97EmgfYJ81llDQYLAtcaOCFoz8fvqOrzPB9BD6mrQgZr+hd0xZjvMqU8giwXmpdFcDvLBDT+8zHwMIA5bCUKX+vHIuRlmL3miezINn11pHD+GF9ruXoAEvnyiwdB04t89/1O/w1cDnyilFU="
-BOSS_USER_ID = "U5e32d2a8818c6780fdd59588c025621"
+# ⚠️ 請確認這個 ID 是「老闆個人 LINE ID」（不是群組ID！）
+# 查詢方式：https://developers.line.biz/console/channel/{你的ChannelID}/messaging-api/insight
+BOSS_USER_ID = "U5e32d2a8818c6780fdd59588c025621"  
 
 DIFY_API_KEY = "app-DTdkXDskAH1htz4BHZpW1j9O"
 DIFY_USER = "raohe_boss"
@@ -31,7 +33,7 @@ GOOGLE_SERVICE_ACCOUNT = {
 }
 # ======================================================================
 
-# 群組規則（會自動學習新增）
+# 群組規則
 GROUP_MAP = {
     "報表":"饒河點貨群拿貨記得紀錄", "上班天數":"饒河點貨群拿貨記得紀錄", "營業額":"饒河點貨群拿貨記得紀錄",
     "現場問題":"饒河現場群", "狀況":"饒河現場群", "機器":"饒河現場群",
@@ -44,10 +46,23 @@ GROUP_MAP = {
 }
 
 GROUP_FILE = "group_map.json"
+# 新增：儲存通知記錄，方便排查
+NOTIFICATION_LOG = "notification_log.json"
 
 # ------------------------------
-# 工具函式
+# 工具函式：新增日誌記錄
 # ------------------------------
+def log_notification(type_msg, content, status):
+    """記錄通知日誌"""
+    log_data = load_json(NOTIFICATION_LOG)
+    log_data.append({
+        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "type": type_msg,
+        "content": content,
+        "status": status  # success/fail
+    })
+    save_json(NOTIFICATION_LOG, log_data)
+
 def load_json(f):
     if os.path.exists(f):
         with open(f, "r", encoding="utf-8") as fp:
@@ -63,14 +78,16 @@ def get_user_name(uid):
         r = requests.get(f"https://api.line.me/v2/bot/profile/{uid}", 
                         headers={"Authorization":f"Bearer {LINE_ACCESS_TOKEN}"},
                         timeout=10)
+        r.raise_for_status()
         return r.json().get("displayName", "未知員工")
     except Exception as e:
         print(f"獲取使用者名稱失敗：{e}")
+        log_notification("get_user_name", f"UID:{uid}, Error:{str(e)}", "fail")
         return "未知員工"
 
 def reply(token, text):
+    """加強版回覆函式"""
     try:
-        # 確保回覆訊息格式正確
         payload = {
             "replyToken": token,
             "messages": [{"type": "text", "text": text}]
@@ -82,18 +99,31 @@ def reply(token, text):
                 "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
             },
             json=payload,
-            timeout=10
+            timeout=15
         )
         r.raise_for_status()
-        print(f"回覆成功：{text}")
+        print(f"✅ 回覆成功：{text}")
+        log_notification("reply", f"Token:{token}, Text:{text}", "success")
+        return True
     except Exception as e:
-        print(f"回覆訊息失敗：{e}，回應內容：{r.text if 'r' in locals() else '無'}")
+        error_msg = f"回覆失敗：{e}，LINE回應：{r.text if 'r' in locals() else '無'}"
+        print(f"❌ {error_msg}")
+        log_notification("reply", f"Token:{token}, Error:{error_msg}", "fail")
+        return False
 
-def push(to, text):
+def push_to_boss(text):
+    """終極版推播老闆函式（多重保障）"""
+    # 1. 先檢查 BOSS_USER_ID 是否合法
+    if not BOSS_USER_ID or not BOSS_USER_ID.startswith("U"):
+        error = f"BOSS_USER_ID 無效：{BOSS_USER_ID}（必須以U開頭的個人ID）"
+        print(f"❌ {error}")
+        log_notification("push", error, "fail")
+        return False, error
+    
+    # 2. 調用 LINE Push API
     try:
-        # 確保推播訊息格式正確
         payload = {
-            "to": to,
+            "to": BOSS_USER_ID,
             "messages": [{"type": "text", "text": text}]
         }
         r = requests.post(
@@ -103,58 +133,68 @@ def push(to, text):
                 "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
             },
             json=payload,
-            timeout=10
+            timeout=15
         )
-        r.raise_for_status()
-        print(f"推播成功給 {to}：{text}")
+        # 列印完整回應（關鍵！排查錯誤）
+        print(f"LINE Push API 回應：{r.status_code} - {r.text}")
+        
+        if r.status_code == 200:
+            print(f"✅ 推播老闆成功：{text}")
+            log_notification("push", f"BOSS_UID:{BOSS_USER_ID}, Text:{text}", "success")
+            return True, "推送成功"
+        else:
+            error = f"推播失敗：LINE返回{r.status_code}，訊息：{r.text}"
+            print(f"❌ {error}")
+            log_notification("push", f"BOSS_UID:{BOSS_USER_ID}, Error:{error}", "fail")
+            return False, error
     except Exception as e:
-        print(f"推播訊息失敗：{e}，回應內容：{r.text if 'r' in locals() else '無'}")
+        error = f"推播異常：{str(e)}"
+        print(f"❌ {error}")
+        log_notification("push", f"BOSS_UID:{BOSS_USER_ID}, Error:{error}", "fail")
+        return False, error
 
 # ------------------------------
-# 自動學習新商品
+# 商品識別
 # ------------------------------
-def get_group(item):
-    # 優先讀取本地儲存的自定義規則
-    gm = dict(load_json(GROUP_FILE))
-    if item in gm:
-        return gm[item]
-    # 其次讀取默認規則
-    if item in GROUP_MAP:
-        return GROUP_MAP[item]
+def extract_product_name(text):
+    clean_text = text.replace("斤","").replace("包","").replace("罐","").replace(" ","").replace("要叫","").replace("我","").replace("買","").replace("訂","").replace("你有識別到","").replace("嗎","")
+    # 優先匹配已知商品
+    for product in GROUP_MAP.keys():
+        if product in clean_text:
+            return product
+    # 自定義商品
+    custom_products = dict(load_json(GROUP_FILE)).keys()
+    for product in custom_products:
+        if product in clean_text:
+            return product
     return None
 
-def add_item(item, group):
-    gm = dict(load_json(GROUP_FILE))
-    gm[item] = group
-    save_json(GROUP_FILE, list(gm.items()))
-
 # ------------------------------
-# 自動分月份：115年3月 饒河報表
+# Dify 對話
 # ------------------------------
-def get_month_sheet(month):
+def chat_with_dify(user_msg):
     try:
-        scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_SERVICE_ACCOUNT, scope)
-        client = gspread.authorize(creds)
-        wb = client.open_by_key(GOOGLE_SHEET_ID)
-        title = f"115年 {month}月 饒河報表"
-        
-        try:
-            sheet = wb.worksheet(title)
-        except:
-            sheet = wb.add_worksheet(title=title, rows="1000", cols="20")
-            sheet.append_row([
-                "日期","天氣","營業額","盒子","玉米","起士",
-                "現場不收錢","電費","瓦斯","薪資","獎金","現場支出",
-                "實收營業額","庫存","上傳者"
-            ])
-        return sheet
+        url = "https://api.dify.ai/v1/chat-messages"
+        headers = {
+            "Authorization": f"Bearer {DIFY_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "inputs": {},
+            "query": user_msg,
+            "response_mode": "blocking",
+            "user": DIFY_USER
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=10)
+        response.raise_for_status()
+        return response.json().get("answer", "我目前無法回覆您哦")
     except Exception as e:
-        print(f"取得Google試算表失敗：{e}")
-        return None
+        error = f"Dify錯誤：{str(e)}"
+        print(f"❌ {error}")
+        return error
 
 # ------------------------------
-# 自動解析報表 + 寫入對應月份
+# 報表處理
 # ------------------------------
 def parse_and_save(text, name):
     lines = text.replace("：",":").split("\n")
@@ -180,8 +220,21 @@ def parse_and_save(text, name):
 
     if "日期" in data:
         month = data["日期"].split("/")[0]
-        sheet = get_month_sheet(month)
-        if sheet:
+        try:
+            scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_SERVICE_ACCOUNT, scope)
+            client = gspread.authorize(creds)
+            wb = client.open_by_key(GOOGLE_SHEET_ID)
+            title = f"115年 {month}月 饒河報表"
+            try:
+                sheet = wb.worksheet(title)
+            except:
+                sheet = wb.add_worksheet(title=title, rows="1000", cols="20")
+                sheet.append_row([
+                    "日期","天氣","營業額","盒子","玉米","起士",
+                    "現場不收錢","電費","瓦斯","薪資","獎金","現場支出",
+                    "實收營業額","庫存","上傳者"
+                ])
             sheet.append_row([
                 data.get("日期",""), data.get("天氣",""), data.get("營業額",""),
                 data.get("盒子",""), data.get("玉米",""), data.get("起士",""),
@@ -189,52 +242,12 @@ def parse_and_save(text, name):
                 data.get("薪資",""), data.get("獎金",""), data.get("現場支出",""),
                 data.get("實收營業額",""), data.get("庫存",""), data.get("上傳者","")
             ])
+        except Exception as e:
+            print(f"寫入Google試算表失敗：{e}")
     return data
 
 # ------------------------------
-# Dify 對話功能
-# ------------------------------
-def chat_with_dify(user_msg):
-    try:
-        url = "https://api.dify.ai/v1/chat-messages"
-        headers = {
-            "Authorization": f"Bearer {DIFY_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "inputs": {},
-            "query": user_msg,
-            "response_mode": "blocking",
-            "user": DIFY_USER
-        }
-        response = requests.post(url, headers=headers, json=data, timeout=10)
-        response.raise_for_status()
-        return response.json().get("answer", "我目前無法回覆您哦")
-    except Exception as e:
-        print(f"Dify對話失敗：{e}")
-        return f"💡 系統回覆：{str(e)}"
-
-# ------------------------------
-# 核心：精確匹配商品名稱
-# ------------------------------
-def extract_product_name(text):
-    """從訊息中提取商品名稱（優先匹配GROUP_MAP中的鍵）"""
-    # 清理多餘字符
-    clean_text = text.replace("斤","").replace("包","").replace("罐","").replace(" ","").replace("要叫","").replace("我","").replace("買","").replace("訂","")
-    # 遍歷所有已知商品，找匹配的
-    for product in GROUP_MAP.keys():
-        if product in clean_text:
-            return product
-    # 遍歷本地自定義商品
-    custom_products = dict(load_json(GROUP_FILE)).keys()
-    for product in custom_products:
-        if product in clean_text:
-            return product
-    # 沒找到返回None
-    return None
-
-# ------------------------------
-# 主程式（完全重構邏輯）
+# 主程式（終極版）
 # ------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -244,11 +257,10 @@ def webhook():
             return "無事件數據", 400
         
         for e in data.get("events", []):
-            # 只處理文字訊息
             if e.get("type") != "message" or e["message"].get("type") != "text":
                 continue
 
-            # 提取核心參數
+            # 核心參數
             txt = e["message"]["text"].strip()
             token = e["replyToken"]
             uid = e["source"]["userId"]
@@ -256,59 +268,104 @@ def webhook():
             is_boss = uid == BOSS_USER_ID
             AT_KEYWORD = "@心安夜市記錄"
 
-            # 1. 報表自動儲存（優先處理）
+            # 1. 報表處理
             if "營業額" in txt and "實收營業額" in txt:
                 dt = parse_and_save(txt, name)
-                reply(token, f"✅ 報表已儲存：{dt.get('日期','')}（自動歸類月份）")
-                push(BOSS_USER_ID, f"【新報表提醒】\n員工：{name}\n日期：{dt.get('日期','')}\n營業額：{dt.get('營業額','')}")
+                reply(token, f"✅ 報表已儲存：{dt.get('日期','')}\n📝 已同步通知老闆")
+                # 推播老闆 + 記錄結果
+                push_msg = f"【新報表】\n員工：{name}\n日期：{dt.get('日期','')}\n營業額：{dt.get('營業額','')}\n實收：{dt.get('實收營業額','')}"
+                push_success, push_msg_detail = push_to_boss(push_msg)
+                # 告訴員工推送結果
+                if push_success:
+                    reply(token, "✅ 通知老闆成功！")
+                else:
+                    reply(token, f"⚠️ 通知老闆失敗：{push_msg_detail}\n請手動告知老闆！")
                 continue
 
-            # 2. 非老闆必須@機器人才處理
+            # 2. 非老闆需@機器人
             if not is_boss and AT_KEYWORD not in txt:
                 continue
 
-            # 3. 清理@標籤，獲取純訊息
+            # 3. 清理訊息
             clean_msg = txt.replace(AT_KEYWORD, "").strip()
             if not clean_msg:
                 reply(token, "💡 請輸入具體內容，例如：我要叫草莓20斤")
                 continue
 
-            # 4. 提取商品名稱
+            # 4. 提取商品
             product = extract_product_name(clean_msg)
             
-            # 5. 有匹配到商品 → 自動分群 + 通知老闆
+            # 5. 已知商品 → 分群 + 強制推送老闆
             if product:
                 target_group = get_group(product)
-                reply(token, f"✅ 已識別商品：{product}\n✅ 自動分群至：{target_group}")
-                # 推播給老闆（確保老闆一定收到）
-                push(BOSS_USER_ID, f"【叫貨通知】\n員工：{name}\n商品：{product}\n數量：{clean_msg}\n群組：{target_group}")
+                # 先回覆員工
+                reply(token, f"✅ 已識別商品：{product}\n✅ 自動分群至：{target_group}\n🔄 正在通知老闆...")
+                # 推播老闆（帶詳細資訊）
+                push_msg = f"【叫貨確認】\n👉 員工：{name}\n👉 商品：{product}\n👉 需求：{clean_msg}\n👉 群組：{target_group}\n⏰ 時間：{datetime.datetime.now().strftime('%H:%M:%S')}"
+                push_success, push_msg_detail = push_to_boss(push_msg)
+                # 回覆員工推送結果
+                if push_success:
+                    reply(token, "✅ 通知老闆成功！老闆已收到確認訊息")
+                else:
+                    reply(token, f"⚠️ 通知老闆失敗！原因：{push_msg_detail}\n請手動複製以下內容告知老闆：\n{push_msg}")
                 continue
             
-            # 6. 沒匹配到商品 → 請示老闆 + 通知
+            # 6. 未知內容（問句/新商品）
             else:
-                # 提取可能的新商品（簡單規則：排除問句關鍵字）
-                question_words = ["為什麼","什麼","為何","沒收到","收不到","怎麼","為"]
+                question_words = ["為什麼","什麼","為何","沒收到","收不到","怎麼","為","識別到","嗎"]
                 is_question = any(word in clean_msg for word in question_words)
                 
                 if is_question:
-                    # 是問句 → 調用Dify回答
+                    # 問句 → Dify回答 + 通知老闆
                     ans = chat_with_dify(clean_msg)
-                    reply(token, ans)
-                    # 同時推播給老闆知道員工的問題
-                    push(BOSS_USER_ID, f"【員工提問】\n員工：{name}\n問題：{clean_msg}\n機器人回覆：{ans}")
+                    reply(token, f"💡 {ans}")
+                    push_msg = f"【員工提問】\n員工：{name}\n問題：{clean_msg}\n機器人回覆：{ans}"
+                    push_success, push_msg_detail = push_to_boss(push_msg)
+                    if not push_success:
+                        reply(token, f"⚠️ 已回覆你的問題，但通知老闆失敗：{push_msg_detail}")
                 else:
-                    # 是新商品 → 請示老闆
-                    reply(token, "✅ 新商品已請示周老闆，請等待回覆～")
-                    push(BOSS_USER_ID, f"【新商品請示】\n員工：{name}\n訊息：{clean_msg}\n請問要將此商品分到哪個群組？")
+                    # 新商品 → 請示老闆
+                    reply(token, "✅ 新商品已請示周老闆！\n🔄 正在發送通知...")
+                    push_msg = f"【新商品請示】\n員工：{name}\n需求：{clean_msg}\n請問要將此商品分到哪個群組？"
+                    push_success, push_msg_detail = push_to_boss(push_msg)
+                    if push_success:
+                        reply(token, "✅ 已成功通知老闆，請等待回覆～")
+                    else:
+                        reply(token, f"⚠️ 通知老闆失敗！原因：{push_msg_detail}\n請手動告知老闆以下內容：\n{push_msg}")
 
         return "OK"
     except Exception as e:
-        print(f"主程式出錯：{e}")
+        error = f"主程式出錯：{str(e)}"
+        print(f"❌ {error}")
+        log_notification("webhook", error, "fail")
         return "ERROR", 500
+
+# ------------------------------
+# 新增：測試推送接口（方便你排查）
+# ------------------------------
+@app.route("/test_push", methods=["GET"])
+def test_push():
+    """訪問此網址測試推播老闆功能：https://你的vercel網址/test_push"""
+    test_msg = f"【測試通知】\n時間：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n測試推播功能是否正常"
+    success, detail = push_to_boss(test_msg)
+    if success:
+        return f"<h1>✅ 測試推送成功！</h1><p>詳情：{detail}</p>"
+    else:
+        return f"<h1>❌ 測試推送失敗！</h1><p>原因：{detail}</p><p>請檢查：</p><ul><li>BOSS_USER_ID 是否為個人ID（以U開頭）</li><li>LINE Access Token 是否有效</li><li>LINE Bot 是否有推送權限</li></ul>"
 
 @app.route("/")
 def home():
-    return "✅ 心安 - 夜市全自動系統（已連Google Sheets）\n✅ 推送功能已修復"
+    return """
+    <h1>✅ 心安 - 夜市全自動系統（終極版）</h1>
+    <p>功能：</p>
+    <ul>
+        <li>✅ 商品識別 + 自動分群</li>
+        <li>✅ 強制推送老闆 + 結果回饋</li>
+        <li>✅ 推送失敗自動提示 + 手動備份</li>
+        <li>✅ 完整日誌記錄</li>
+    </ul>
+    <p>測試推送功能：<a href="/test_push">點擊測試</a></p>
+    """
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=80, debug=True)
