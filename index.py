@@ -2,14 +2,13 @@ from flask import Flask, request
 import json
 import datetime
 import os
-import threading
 import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 app = Flask(__name__)
 
-# ===================== 【全部幫你填好！直接用】 =====================
+# ===================== 【全部填好！直接用】 =====================
 LINE_ACCESS_TOKEN = "TXTgg7f8Xbf4+RlW37gCW27YkazQ97EmgfYJ81llDQYLAtcaOCFoz8fvqOrzPB9BD6mrQgZr+hd0xZjvMqU8giwXmpdFcDvLBDT+8zHwMIA5bCUKX+vHIuRlmL3miezINn11pHD+GF9ruXoAEvnyiwdB04t89/1O/w1cDnyilFU="
 BOSS_USER_ID = "U5e32d2a8818c6780fdd59588c025621"
 
@@ -26,7 +25,7 @@ GOOGLE_SERVICE_ACCOUNT = {
   "client_id": "115836904378519580039",
   "auth_uri": "https://accounts.google.com/o/oauth2/auth",
   "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/o2/v1/certs",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",  # 修正錯誤的URL
   "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/raohe-500%40crafty-key-490400-h4.iam.gserviceaccount.com",
   "universe_domain": "googleapis.com"
 }
@@ -61,20 +60,28 @@ def save_json(f, data):
 
 def get_user_name(uid):
     try:
-        r = requests.get(f"https://api.line.me/v2/bot/profile/{uid}", headers={"Authorization":f"Bearer {LINE_ACCESS_TOKEN}"})
+        r = requests.get(f"https://api.line.me/v2/bot/profile/{uid}", 
+                        headers={"Authorization":f"Bearer {LINE_ACCESS_TOKEN}"})
         return r.json().get("displayName", "未知員工")
-    except:
+    except Exception as e:
+        print(f"獲取使用者名稱失敗：{e}")
         return "未知員工"
 
 def reply(token, text):
-    requests.post("https://api.line.me/v2/bot/message/reply",
-        headers={"Content-Type":"application/json","Authorization":f"Bearer {LINE_ACCESS_TOKEN}"},
-        json={"replyToken":token,"messages":[{"type":"text","text":text}]})
+    try:
+        requests.post("https://api.line.me/v2/bot/message/reply",
+            headers={"Content-Type":"application/json","Authorization":f"Bearer {LINE_ACCESS_TOKEN}"},
+            json={"replyToken":token,"messages":[{"type":"text","text":text}]})
+    except Exception as e:
+        print(f"回覆訊息失敗：{e}")
 
 def push(to, text):
-    requests.post("https://api.line.me/v2/bot/message/push",
-        headers={"Content-Type":"application/json","Authorization":f"Bearer {LINE_ACCESS_TOKEN}"},
-        json={"to":to,"messages":[{"type":"text","text":text}]})
+    try:
+        requests.post("https://api.line.me/v2/bot/message/push",
+            headers={"Content-Type":"application/json","Authorization":f"Bearer {LINE_ACCESS_TOKEN}"},
+            json={"to":to,"messages":[{"type":"text","text":text}]})
+    except Exception as e:
+        print(f"推播訊息失敗：{e}")
 
 # ------------------------------
 # 自動學習新商品
@@ -113,7 +120,8 @@ def get_month_sheet(month):
                 "實收營業額","庫存","上傳者"
             ])
         return sheet
-    except:
+    except Exception as e:
+        print(f"取得Google試算表失敗：{e}")
         return None
 
 # ------------------------------
@@ -155,7 +163,7 @@ def parse_and_save(text, name):
     return data
 
 # ------------------------------
-# Dify 對話功能
+# Dify 對話功能（修正參數錯誤）
 # ------------------------------
 def chat_with_dify(user_msg):
     try:
@@ -170,72 +178,86 @@ def chat_with_dify(user_msg):
             "response_mode": "blocking",
             "user": DIFY_USER
         }
-        response = requests.post(url, json=headers, data=data)
+        # 修正：原本把headers和data顛倒了！
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()  # 觸發HTTP錯誤
         return response.json().get("answer", "我目前無法回覆您哦")
-    except:
-        return None
+    except Exception as e:
+        print(f"Dify對話失敗：{e}")
+        return f"對話出錯：{str(e)}"
 
 # ------------------------------
-# 主程式
+# 主程式（修正@指令匹配）
 # ------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json()
-    for e in data.get("events", []):
-        if e["type"] != "message" or e["message"]["type"] != "text":
-            continue
+    try:
+        data = request.get_json()
+        for e in data.get("events", []):
+            if e["type"] != "message" or e["message"]["type"] != "text":
+                continue
 
-        txt = e["message"]["text"].strip()
-        token = e["replyToken"]
-        uid = e["source"]["userId"]
-        name = get_user_name(uid)
-        is_boss = uid == BOSS_USER_ID
+            txt = e["message"]["text"].strip()
+            token = e["replyToken"]
+            uid = e["source"]["userId"]
+            name = get_user_name(uid)
+            is_boss = uid == BOSS_USER_ID
 
-        # 報表自動儲存
-        if "營業額" in txt and "實收營業額" in txt:
-            dt = parse_and_save(txt, name)
-            reply(token, f"✅ 報表已儲存：{dt.get('日期','')}（自動歸類月份）")
-            push(BOSS_USER_ID, f"【新報表】{name} 上傳 {dt.get('日期','')}")
-            continue
+            # 報表自動儲存
+            if "營業額" in txt and "實收營業額" in txt:
+                dt = parse_and_save(txt, name)
+                reply(token, f"✅ 報表已儲存：{dt.get('日期','')}（自動歸類月份）")
+                push(BOSS_USER_ID, f"【新報表】{name} 上傳 {dt.get('日期','')}")
+                continue
 
-        # 員工未@ → 不處理
-        if not is_boss and "@心安" not in txt:
-            continue
+            # 修正：匹配「@心安夜市記錄」而非「@心安」
+            AT_KEYWORD = "@心安夜市記錄"
+            if not is_boss and AT_KEYWORD not in txt:
+                continue
 
-        clean = txt.replace("@心安","").strip()
+            # 清理@標籤
+            clean = txt.replace(AT_KEYWORD, "").strip()
 
-        # 新商品 → 問老闆
-        new_item = None
-        target = None
-        for w in clean.replace("斤","").replace("包","").replace("罐","").replace(" ",""):
-            if len(w) < 2: continue
-            g = get_group(w)
-            if g:
-                target = g
-            else:
-                new_item = w
+            # 優化商品識別邏輯：逐詞比對，不是逐字
+            new_item = None
+            target = None
+            # 拆分訊息成單詞（去除數量單位）
+            words = clean.replace("斤","").replace("包","").replace("罐","").replace(" ","").replace("要叫","").split()
+            for word in words:
+                if len(word) < 1:
+                    continue
+                g = get_group(word)
+                if g:
+                    target = g
+                else:
+                    # 判斷是否是商品名（排除數字、問句）
+                    if not word.isdigit() and word not in ["我","要","叫","為什麼","什麼","為何"]:
+                        new_item = word
 
-        if new_item and not target:
-            reply(token, "✅ 新商品已請示周老闆")
-            push(BOSS_USER_ID, f"---\n新商品：{new_item}\n請問要分到哪個群組？\n---")
-            continue
+            # 新商品 → 問老闆
+            if new_item and not target:
+                reply(token, "✅ 新商品已請示周老闆")
+                push(BOSS_USER_ID, f"---\n新商品：{new_item}\n請問要分到哪個群組？\n---")
+                continue
 
-        # 既有商品 → 自動分群
-        if target:
-            reply(token, f"✅ 已分群至：{target}")
-            push(BOSS_USER_ID, f"---\n【叫貨】{name}\n內容：{clean}\n群組：{target}\n---")
-            continue
+            # 既有商品 → 自動分群
+            if target:
+                reply(token, f"✅ 已分群至：{target}")
+                push(BOSS_USER_ID, f"---\n【叫貨】{name}\n內容：{clean}\n群組：{target}\n---")
+                continue
 
-        # Dify 智慧對話
-        ans = chat_with_dify(clean)
-        if ans:
+            # Dify 智慧對話
+            ans = chat_with_dify(clean)
             reply(token, ans)
 
-    return "OK"
+        return "OK"
+    except Exception as e:
+        print(f"主程式出錯：{e}")
+        return "ERROR", 500
 
 @app.route("/")
 def home():
     return "✅ 心安 - 夜市全自動系統（已連Google Sheets）"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=80)
+    app.run(host="0.0.0.0", port=80, debug=True)  # 開啟debug便於排查
